@@ -26,7 +26,8 @@ PubSubClient client(espClient);
 #define DHTPIN D5
 #define DHTTYPE DHT22
 #define SERVO_PIN D6
-#define CONTROL_PIN D7
+#define LAMP_PIN D7
+#define FAN_PIN D1  // Pin untuk kipas (jika ada)
 
 float TEMP_THRESHOLD = 31.00;  // Dapat diubah via MQTT
 
@@ -99,14 +100,14 @@ void callback(char* topic, byte* payload, unsigned int length) {
     float newThreshold = message.toFloat();
     
     // Validasi nilai threshold
-    if (newThreshold >= 10.0 && newThreshold <= 50.0) {
+    if (newThreshold >= 10.0 && newThreshold <= 100.0) {
       TEMP_THRESHOLD = newThreshold;
       Serial.printf("Threshold baru: %.2f °C\n", TEMP_THRESHOLD);
       
       // Konfirmasi update via MQTT (opsional)
       client.publish("iot/sensor/confirm", ("Threshold updated: " + String(TEMP_THRESHOLD)).c_str());
     } else {
-      Serial.println("Nilai threshold tidak valid (10-50)!");
+      Serial.println("Nilai threshold tidak valid (10-100)!");
     }
   }
 }
@@ -141,8 +142,10 @@ void setup() {
   dhtSensor.begin();
   servoController.begin(SERVO_PIN);
 
-  pinMode(CONTROL_PIN, OUTPUT);
-  digitalWrite(CONTROL_PIN, LOW);  // Lampu nyala default
+  pinMode(LAMP_PIN, OUTPUT);
+  pinMode(FAN_PIN, OUTPUT);  // Pin untuk kipas (jika ada)
+  digitalWrite(FAN_PIN, LOW);  // Kipas mati default
+  digitalWrite(LAMP_PIN, LOW);  // Lampu nyala default
 }
 
 void loop() {
@@ -166,7 +169,7 @@ void loop() {
     doc["SuhuLampu"] = temperature;
     doc["Kelembapan"] = humidity;
     doc["StatusLampu"] = lampStatus;
-    doc["StatusKipas"] = false;  // Misalnya, kipas mati, ganti logika sesuai kebutuhan
+    doc["StatusKipas"] = !lampStatus;  // Misalnya, kipas mati, ganti logika sesuai kebutuhan
     doc["Threshold"] = TEMP_THRESHOLD;
     doc["ServoAngle"] = angle;
 
@@ -182,10 +185,14 @@ void loop() {
 
     // Mengontrol lampu berdasarkan suhu
     if (lampStatus) {
-      digitalWrite(CONTROL_PIN, LOW);  // Lampu nyala
+      digitalWrite(FAN_PIN, LOW);  // Kipas nyala
+      Serial.println("Kipas Mati");
+      digitalWrite(LAMP_PIN, LOW);  // Lampu nyala
       Serial.println("Lampu Nyala");
     } else {
-      digitalWrite(CONTROL_PIN, HIGH);  // Lampu mati
+      digitalWrite(FAN_PIN, HIGH);  // Kipas mati
+      Serial.println("Kipas Mati");
+      digitalWrite(LAMP_PIN, HIGH);  // Lampu mati
       Serial.println("Lampu Mati");
     }
 
