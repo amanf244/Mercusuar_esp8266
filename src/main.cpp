@@ -3,12 +3,13 @@
 #include <WiFiClientSecure.h>
 #include <PubSubClient.h>
 #include <DHT.h>
+#include <ESP8266HTTPClient.h>  
 #include <Servo.h>
-#include <ArduinoJson.h>  // Pastikan kamu sudah menginstal ArduinoJson
+#include <ArduinoJson.h>  
 
 // ======================= Konfigurasi WiFi dan MQTT =======================
-const char* ssid = "NAILY";
-const char* password = "naji2010";
+const char* ssid = "Kelompok4";
+const char* password = "Kelompok4";
 
 // HiveMQ Cloud details
 const char* mqtt_server = "a3f850802ac34230b60106b86aaa6ae8.s1.eu.hivemq.cloud";  // Ganti dengan broker yang diberikan HiveMQ Cloud
@@ -28,6 +29,9 @@ PubSubClient client(espClient);
 #define SERVO_PIN D6
 #define LAMP_PIN D7
 #define FAN_PIN D1  // Pin untuk kipas (jika ada)
+#define LED_WIFI D4    // LED hijau untuk status WiFi
+#define LED_MQTT D3    // LED kuning untuk status MQTT
+
 
 float TEMP_THRESHOLD = 31.00;  // Dapat diubah via MQTT
 
@@ -78,15 +82,30 @@ class ServoController {
 DHTSensor dhtSensor(DHTPIN);
 ServoController servoController;
 
-void setup_wifi() {
+bool setup_wifi() {
   delay(10);
   Serial.print("Menghubungkan ke WiFi...");
   WiFi.begin(ssid, password);
+
   while (WiFi.status() != WL_CONNECTED) {
-    delay(500); Serial.print(".");
+    digitalWrite(LED_WIFI, LOW);   // Nyala saat mencoba (active-low)
+    delay(250);
+    digitalWrite(LED_WIFI, HIGH);  // Mati
+    delay(250);
+    Serial.print(".");
   }
-  Serial.println("\nWiFi terhubung");
+
+  if (WiFi.status() == WL_CONNECTED) {
+    digitalWrite(LED_WIFI, LOW);
+    Serial.println("\nWiFi terhubung");
+    return true;
+  } else {
+    digitalWrite(LED_WIFI, HIGH);
+    Serial.println("\nGagal terhubung WiFi!");
+    return false;
+  }
 }
+
 
 void callback(char* topic, byte* payload, unsigned int length) {
   String message;
@@ -112,25 +131,86 @@ void callback(char* topic, byte* payload, unsigned int length) {
   }
 }
 
+// Fungsi untuk mengecek koneksi internet
+bool isInternetConnected() {
+  WiFiClient client;
+  const int timeout = 5000; // Timeout 5 detik
+  const char* host = "www.google.com";
+  const int port = 80;
+
+  if (!client.connect(host, port)) {
+    unsigned long start = millis();
+    while (!client.connected() && millis() - start < timeout) {
+      delay(100);
+    }
+  }
+
+  bool result = client.connected();
+  client.stop();
+  return result;
+}
+
 void reconnect() {
   while (!client.connected()) {
     Serial.print("Menghubungkan ke MQTT...");
-    String clientId = "ESP8266-" + String(ESP.getChipId());  // ID unik
+    digitalWrite(LED_MQTT, HIGH);  // Reset state
+
+    // Cek WiFi & Internet
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("\nWiFi terputus! Mencoba reconnect...");
+      digitalWrite(LED_WIFI, HIGH);  // Mati
+      if (!setup_wifi()) {
+        Serial.println("Gagal reconnect WiFi!");
+        delay(5000);
+        continue;
+      }
+    }
     
+    if (!isInternetConnected()) {
+      Serial.println("Tidak ada internet!");
+      digitalWrite(LED_MQTT, LOW);
+      delay(5000);
+      continue;
+    }
+
+    // Koneksi MQTT
+    String clientId = "ESP8266-" + String(ESP.getChipId());
     if (client.connect(clientId.c_str(), mqtt_user, mqtt_pass)) {
       Serial.println("terhubung");
-      client.subscribe(mqtt_topic_threshold);  // Subscribe ke topik threshold
+      client.subscribe(mqtt_topic_threshold);
+      digitalWrite(LED_MQTT, HIGH);  // Nyala saat terhubung
     } else {
       Serial.print("Gagal, rc=");
       Serial.print(client.state());
       Serial.println(" mencoba lagi dalam 5 detik");
-      delay(5000);
+
+      // Blink LED_MQTT dengan non-blocking
+      unsigned long startTime = millis();
+      while (millis() - startTime < 250) {
+        digitalWrite(LED_MQTT, !digitalRead(LED_MQTT));
+        delay(250);
+        yield();
+      }
     }
   }
 }
 
+
+
+
 void setup() {
   Serial.begin(115200);
+
+  pinMode(LAMP_PIN, OUTPUT);
+  pinMode(FAN_PIN, OUTPUT);  // Pin untuk kipas (jika ada)
+  digitalWrite(FAN_PIN, LOW);  // Kipas mati default
+  digitalWrite(LAMP_PIN, HIGH);  // Lampu nyala default
+  pinMode(LED_WIFI, OUTPUT);
+   pinMode(LED_MQTT, OUTPUT);
+digitalWrite(LED_WIFI, LOW);   // Mulai dalam keadaan mati
+digitalWrite(LED_MQTT, LOW);
+
+
   setup_wifi();
   espClient.setInsecure(); // Skip certificate verification (untuk testing)
 // atau gunakan root CA yang valid:
@@ -142,21 +222,47 @@ void setup() {
   dhtSensor.begin();
   servoController.begin(SERVO_PIN);
 
-  pinMode(LAMP_PIN, OUTPUT);
-  pinMode(FAN_PIN, OUTPUT);  // Pin untuk kipas (jika ada)
-  digitalWrite(FAN_PIN, LOW);  // Kipas mati default
-  digitalWrite(LAMP_PIN, LOW);  // Lampu nyala default
+  
+ // Uji LED langsung
+// Uji LED
+digitalWrite(LED_WIFI, LOW);  // Nyala
+delay(1000);
+digitalWrite(LED_WIFI, HIGH); // Mati
+delay(1000);
+digitalWrite(LED_WIFI, LOW);  // Nyala lagi
+delay(1000);
+digitalWrite(LED_WIFI, HIGH); // Mati
+
 }
 
 void loop() {
+  // Cek WiFi
+  // if (WiFi.status() != WL_CONNECTED) {
+  //   Serial.println("WiFi putus. Coba reconnect...");
+  //   if (!setup_wifi()) {
+  //     digitalWrite(LED_WIFI, HIGH);
+  //     return;
+  //   }
+  // }
+
+  // // Cek Internet
+  // if (!isInternetConnected()) {
+  //   Serial.println("Internet tidak tersedia.");
+  //   digitalWrite(LED_MQTT, HIGH);
+  //   // Lanjutkan kontrol lokal (jangan return!)
+  // }
+
+  // MQTT reconnect jika perlu
   if (!client.connected()) {
     reconnect();
   }
+
   client.loop();
 
   dhtSensor.update();
 
   if (dhtSensor.getStatus() == SENSOR_READY) {
+    // Mengambil data dari sensor DHT
     float temperature = dhtSensor.getTemperature();
     float humidity = dhtSensor.getHumidity();
     int angle = map(temperature, 0, 40, 0, 180);
@@ -198,9 +304,10 @@ void loop() {
 
     Serial.printf("Suhu: %.2f °C | Humidity: %.2f %% | Threshold: %.2f | StatusLampu: %s\n", 
                   temperature, humidity, TEMP_THRESHOLD, lampStatus ? "Nyala" : "Mati");
+  
   } else {
     Serial.println("Gagal membaca sensor DHT!");
   }
 
-  delay(1000);  // Delay 1 detik untuk loop
+  //delay(1000);  // Delay 1 detik untuk loop
 }
