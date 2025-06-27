@@ -8,17 +8,19 @@
 #include <ArduinoJson.h>  
 
 // ======================= Konfigurasi WiFi dan MQTT =======================
-const char* ssid = "Kelompok4";
-const char* password = "Kelompok4";
+const char* ssid = "aman";
+const char* password = "aman2002";
 
 // HiveMQ Cloud details
-const char* mqtt_server = "a3f850802ac34230b60106b86aaa6ae8.s1.eu.hivemq.cloud";  // Ganti dengan broker yang diberikan HiveMQ Cloud
-const int mqtt_port = 8883;  // Port dengan TLS
-const char* mqtt_user = "hivemq.webclient.1745768022480";  // Ganti dengan username dari HiveMQ Cloud
-const char* mqtt_pass = "K1zTM:0g!roXYdJ74w;>";  // Ganti dengan password dari HiveMQ Cloud
+const char* mqtt_server = "a3f850802ac34230b60106b86aaa6ae8.s1.eu.hivemq.cloud";
+const int mqtt_port = 8883;
+const char* mqtt_user = "hivemq.webclient.1745768022480";
+const char* mqtt_pass = "K1zTM:0g!roXYdJ74w;>";
 
-const char* mqtt_topic_status = "iot/sensor";        // Untuk kirim suhu/beban
-const char* mqtt_topic_threshold = "iot/sensor/set";   // Untuk terima update threshold
+const char* mqtt_topic_status = "iot/sensor";
+const char* mqtt_topic_threshold = "iot/sensor/set";
+const char* mqtt_topic_lamp_control = "iot/actuator/lamp";
+const char* mqtt_topic_fan_control = "iot/actuator/fan";
 
 WiFiClientSecure espClient;
 PubSubClient client(espClient);
@@ -28,12 +30,17 @@ PubSubClient client(espClient);
 #define DHTTYPE DHT22
 #define SERVO_PIN D6
 #define LAMP_PIN D7
-#define FAN_PIN D1  // Pin untuk kipas (jika ada)
-#define LED_WIFI D4    // LED hijau untuk status WiFi
-#define LED_MQTT D3    // LED kuning untuk status MQTT
+#define FAN_PIN D1
+#define LED_WIFI D4
+#define LED_MQTT D3
 
+float TEMP_THRESHOLD = 31.00;
 
-float TEMP_THRESHOLD = 31.00;  // Dapat diubah via MQTT
+// Variabel kontrol manual
+bool MANUAL_LAMP_CONTROL = false;
+bool MANUAL_FAN_CONTROL = false;
+bool LAMP_STATE = false;
+bool FAN_STATE = false;
 
 enum SensorStatus { SENSOR_READY, SENSOR_ERROR };
 
@@ -88,9 +95,9 @@ bool setup_wifi() {
   WiFi.begin(ssid, password);
 
   while (WiFi.status() != WL_CONNECTED) {
-    digitalWrite(LED_WIFI, LOW);   // Nyala saat mencoba (active-low)
+    digitalWrite(LED_WIFI, LOW);
     delay(250);
-    digitalWrite(LED_WIFI, HIGH);  // Mati
+    digitalWrite(LED_WIFI, HIGH);
     delay(250);
     Serial.print(".");
   }
@@ -106,7 +113,6 @@ bool setup_wifi() {
   }
 }
 
-
 void callback(char* topic, byte* payload, unsigned int length) {
   String message;
   for (unsigned int i = 0; i < length; i++) {
@@ -118,23 +124,53 @@ void callback(char* topic, byte* payload, unsigned int length) {
   if (String(topic) == mqtt_topic_threshold) {
     float newThreshold = message.toFloat();
     
-    // Validasi nilai threshold
     if (newThreshold >= 10.0 && newThreshold <= 100.0) {
       TEMP_THRESHOLD = newThreshold;
       Serial.printf("Threshold baru: %.2f °C\n", TEMP_THRESHOLD);
-      
-      // Konfirmasi update via MQTT (opsional)
       client.publish("iot/sensor/confirm", ("Threshold updated: " + String(TEMP_THRESHOLD)).c_str());
     } else {
       Serial.println("Nilai threshold tidak valid (10-100)!");
     }
   }
+  // Handle manual lamp control
+  else if (String(topic) == mqtt_topic_lamp_control) {
+    if (message == "ON") {
+      MANUAL_LAMP_CONTROL = true;
+      LAMP_STATE = true;
+      digitalWrite(LAMP_PIN, LOW);  // Nyala (active-low)
+      Serial.println("Lampu manual NYALA");
+    } else if (message == "OFF") {
+      MANUAL_LAMP_CONTROL = true;
+      LAMP_STATE = false;
+      digitalWrite(LAMP_PIN, HIGH); // Mati
+      Serial.println("Lampu manual MATI");
+    } else if (message == "AUTO") {
+      MANUAL_LAMP_CONTROL = false;
+      Serial.println("Lampu kembali AUTO");
+    }
+  }
+  // Handle manual fan control
+  else if (String(topic) == mqtt_topic_fan_control) {
+    if (message == "ON") {
+      MANUAL_FAN_CONTROL = true;
+      FAN_STATE = true;
+      digitalWrite(FAN_PIN, HIGH); // Kipas nyala
+      Serial.println("Kipas manual NYALA");
+    } else if (message == "OFF") {
+      MANUAL_FAN_CONTROL = true;
+      FAN_STATE = false;
+      digitalWrite(FAN_PIN, LOW);  // Kipas mati
+      Serial.println("Kipas manual MATI");
+    } else if (message == "AUTO") {
+      MANUAL_FAN_CONTROL = false;
+      Serial.println("Kipas kembali AUTO");
+    }
+  }
 }
 
-// Fungsi untuk mengecek koneksi internet
 bool isInternetConnected() {
   WiFiClient client;
-  const int timeout = 5000; // Timeout 5 detik
+  const int timeout = 5000;
   const char* host = "www.google.com";
   const int port = 80;
 
@@ -153,12 +189,11 @@ bool isInternetConnected() {
 void reconnect() {
   while (!client.connected()) {
     Serial.print("Menghubungkan ke MQTT...");
-    digitalWrite(LED_MQTT, HIGH);  // Reset state
+    digitalWrite(LED_MQTT, HIGH);
 
-    // Cek WiFi & Internet
     if (WiFi.status() != WL_CONNECTED) {
       Serial.println("\nWiFi terputus! Mencoba reconnect...");
-      digitalWrite(LED_WIFI, HIGH);  // Mati
+      digitalWrite(LED_WIFI, HIGH);
       if (!setup_wifi()) {
         Serial.println("Gagal reconnect WiFi!");
         delay(5000);
@@ -173,18 +208,18 @@ void reconnect() {
       continue;
     }
 
-    // Koneksi MQTT
     String clientId = "ESP8266-" + String(ESP.getChipId());
     if (client.connect(clientId.c_str(), mqtt_user, mqtt_pass)) {
       Serial.println("terhubung");
       client.subscribe(mqtt_topic_threshold);
-      digitalWrite(LED_MQTT, HIGH);  // Nyala saat terhubung
+      client.subscribe(mqtt_topic_lamp_control);
+      client.subscribe(mqtt_topic_fan_control);
+      digitalWrite(LED_MQTT, HIGH);
     } else {
       Serial.print("Gagal, rc=");
       Serial.print(client.state());
       Serial.println(" mencoba lagi dalam 5 detik");
 
-      // Blink LED_MQTT dengan non-blocking
       unsigned long startTime = millis();
       while (millis() - startTime < 250) {
         digitalWrite(LED_MQTT, !digitalRead(LED_MQTT));
@@ -195,64 +230,50 @@ void reconnect() {
   }
 }
 
-
-
-
 void setup() {
   Serial.begin(115200);
 
   pinMode(LAMP_PIN, OUTPUT);
-  pinMode(FAN_PIN, OUTPUT);  // Pin untuk kipas (jika ada)
-  digitalWrite(FAN_PIN, LOW);  // Kipas mati default
-  digitalWrite(LAMP_PIN, HIGH);  // Lampu nyala default
+  pinMode(FAN_PIN, OUTPUT);
+  digitalWrite(FAN_PIN, LOW);
+  digitalWrite(LAMP_PIN, HIGH);
   pinMode(LED_WIFI, OUTPUT);
-   pinMode(LED_MQTT, OUTPUT);
-digitalWrite(LED_WIFI, LOW);   // Mulai dalam keadaan mati
-digitalWrite(LED_MQTT, LOW);
+  pinMode(LED_MQTT, OUTPUT);
+  digitalWrite(LED_WIFI, LOW);
+  digitalWrite(LED_MQTT, LOW);
 
+  // Uji LED
+  digitalWrite(LED_WIFI, LOW);
+  delay(1000);
+  digitalWrite(LED_WIFI, HIGH);
+  delay(1000);
+  digitalWrite(LED_WIFI, LOW);
+  delay(1000);
+  digitalWrite(LED_WIFI, HIGH);
 
   setup_wifi();
-  espClient.setInsecure(); // Skip certificate verification (untuk testing)
-// atau gunakan root CA yang valid:
-// const char* ca_cert = "-----BEGIN CERTIFICATE-----\n...";
-// espClient.setCACert(ca_cert);
+  espClient.setInsecure();
   client.setServer(mqtt_server, mqtt_port);
   client.setCallback(callback);
 
   dhtSensor.begin();
   servoController.begin(SERVO_PIN);
-
-  
- // Uji LED langsung
-// Uji LED
-digitalWrite(LED_WIFI, LOW);  // Nyala
-delay(1000);
-digitalWrite(LED_WIFI, HIGH); // Mati
-delay(1000);
-digitalWrite(LED_WIFI, LOW);  // Nyala lagi
-delay(1000);
-digitalWrite(LED_WIFI, HIGH); // Mati
-
 }
 
 void loop() {
-  // Cek WiFi
-  // if (WiFi.status() != WL_CONNECTED) {
-  //   Serial.println("WiFi putus. Coba reconnect...");
-  //   if (!setup_wifi()) {
-  //     digitalWrite(LED_WIFI, HIGH);
-  //     return;
-  //   }
-  // }
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi putus. Coba reconnect...");
+    if (!setup_wifi()) {
+      digitalWrite(LED_WIFI, HIGH);
+      return;
+    }
+  }
 
-  // // Cek Internet
-  // if (!isInternetConnected()) {
-  //   Serial.println("Internet tidak tersedia.");
-  //   digitalWrite(LED_MQTT, HIGH);
-  //   // Lanjutkan kontrol lokal (jangan return!)
-  // }
+  if (!isInternetConnected()) {
+    Serial.println("Internet tidak tersedia.");
+    digitalWrite(LED_MQTT, HIGH);
+  }
 
-  // MQTT reconnect jika perlu
   if (!client.connected()) {
     reconnect();
   }
@@ -262,52 +283,51 @@ void loop() {
   dhtSensor.update();
 
   if (dhtSensor.getStatus() == SENSOR_READY) {
-    // Mengambil data dari sensor DHT
     float temperature = dhtSensor.getTemperature();
     float humidity = dhtSensor.getHumidity();
     int angle = map(temperature, 0, 40, 0, 180);
     servoController.update(angle);
 
-    bool lampStatus = temperature < TEMP_THRESHOLD;  // Status lampu (nyala/mati)
+    // Kontrol otomatis hanya jika tidak dalam mode manual
+    if (!MANUAL_LAMP_CONTROL) {
+      bool lampStatus = temperature < TEMP_THRESHOLD;
+      digitalWrite(LAMP_PIN, lampStatus ? LOW : HIGH);
+      LAMP_STATE = lampStatus;
+    }
+
+    if (!MANUAL_FAN_CONTROL) {
+      bool fanStatus = temperature >= TEMP_THRESHOLD;
+      digitalWrite(FAN_PIN, fanStatus ? HIGH : LOW);
+      FAN_STATE = fanStatus;
+    }
 
     // Membuat JSON
     StaticJsonDocument<200> doc;
     doc["SuhuLampu"] = temperature;
     doc["Kelembapan"] = humidity;
-    doc["StatusLampu"] = lampStatus;
-    doc["StatusKipas"] = !lampStatus;  // Misalnya, kipas mati, ganti logika sesuai kebutuhan
+    doc["StatusLampu"] = LAMP_STATE;
+    doc["StatusKipas"] = FAN_STATE;
     doc["Threshold"] = TEMP_THRESHOLD;
     doc["ServoAngle"] = angle;
+    doc["ManualModeLamp"] = MANUAL_LAMP_CONTROL;
+    doc["ManualModeFan"] = MANUAL_FAN_CONTROL;
 
-    // doc["ServoStatus"] = (angle == -1) ? "Error" : "OK";  // Status servo
-    // doc["SensorStatus"] = (dhtSensor.getStatus() == SENSOR_ERROR) ? "Error" : "OK";  // Status sensor
-
-    // Serialize JSON ke string
     char jsonBuffer[512];
     serializeJson(doc, jsonBuffer);
 
     // Mengirim data JSON melalui MQTT
     client.publish(mqtt_topic_status, jsonBuffer);
 
-    // Mengontrol lampu berdasarkan suhu
-    if (lampStatus) {
-      digitalWrite(FAN_PIN, LOW);  // Kipas nyala
-      Serial.println("Kipas Mati");
-      digitalWrite(LAMP_PIN, LOW);  // Lampu nyala
-      Serial.println("Lampu Nyala");
-    } else {
-      digitalWrite(FAN_PIN, HIGH);  // Kipas mati
-      Serial.println("Kipas Mati");
-      digitalWrite(LAMP_PIN, HIGH);  // Lampu mati
-      Serial.println("Lampu Mati");
-    }
-
-    Serial.printf("Suhu: %.2f °C | Humidity: %.2f %% | Threshold: %.2f | StatusLampu: %s\n", 
-                  temperature, humidity, TEMP_THRESHOLD, lampStatus ? "Nyala" : "Mati");
+    Serial.printf("Suhu: %.2f °C | Humidity: %.2f %% | Threshold: %.2f | Lamp: %s | Fan: %s | ManualLamp: %s | ManualFan: %s\n", 
+                  temperature, humidity, TEMP_THRESHOLD, 
+                  LAMP_STATE ? "Nyala" : "Mati", 
+                  FAN_STATE ? "Nyala" : "Mati",
+                  MANUAL_LAMP_CONTROL ? "ON" : "AUTO",
+                  MANUAL_FAN_CONTROL ? "ON" : "AUTO");
   
   } else {
     Serial.println("Gagal membaca sensor DHT!");
   }
 
-  //delay(1000);  // Delay 1 detik untuk loop
+  delay(1000);
 }
