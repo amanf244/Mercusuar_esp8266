@@ -120,16 +120,24 @@ void callback(char* topic, byte* payload, unsigned int length) {
   }
   Serial.printf("Pesan MQTT diterima [%s]: %s\n", topic, message.c_str());
 
-  // Handle update threshold
-  if (String(topic) == mqtt_topic_threshold) {
-    float newThreshold = message.toFloat();
+ if (String(topic) == mqtt_topic_threshold) {
+    // Ganti koma menjadi titik untuk format desimal
+    message.replace(',', '.');
     
-    if (newThreshold >= 10.0 && newThreshold <= 100.0) {
-      TEMP_THRESHOLD = newThreshold;
-      Serial.printf("Threshold baru: %.2f °C\n", TEMP_THRESHOLD);
-      client.publish("iot/sensor/confirm", ("Threshold updated: " + String(TEMP_THRESHOLD)).c_str());
+    // Gunakan fungsi parsing yang lebih robust
+    char* endptr;
+    float newThreshold = strtof(message.c_str(), &endptr);
+    
+    // Cek apakah konversi berhasil
+    if (endptr != message.c_str() && *endptr == '\0' && 
+        newThreshold >= 10.0 && newThreshold <= 100.0) {
+        TEMP_THRESHOLD = newThreshold;
+        Serial.printf("Threshold baru: %.2f °C\n", TEMP_THRESHOLD);
+        client.publish("iot/sensor/confirm", ("Threshold updated: " + String(TEMP_THRESHOLD, 1)).c_str());
     } else {
-      Serial.println("Nilai threshold tidak valid (10-100)!");
+        Serial.println("Nilai threshold tidak valid (10-100)!");
+        // Kirim pesan error
+        client.publish("iot/sensor/error", "Invalid threshold value");
     }
   }
   // Handle manual lamp control
