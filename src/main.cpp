@@ -8,8 +8,8 @@
 #include <ArduinoJson.h>  
 
 // ======================= Konfigurasi WiFi dan MQTT =======================
-const char* ssid = "aman";
-const char* password = "aman2002";
+const char* ssid = "kelompokempat";
+const char* password = "kelompokempat";
 
 // HiveMQ Cloud details
 const char* mqtt_server = "a3f850802ac34230b60106b86aaa6ae8.s1.eu.hivemq.cloud";
@@ -35,12 +35,22 @@ PubSubClient client(espClient);
 #define LED_MQTT D3
 
 float TEMP_THRESHOLD = 31.00;
+const float HYSTERESIS = 0.5; // Hysteresis untuk mencegah kedipan
 
 // Variabel kontrol manual
 bool MANUAL_LAMP_CONTROL = false;
 bool MANUAL_FAN_CONTROL = false;
 bool LAMP_STATE = false;
 bool FAN_STATE = false;
+
+// ====================== Servo Sweep Variables =====================
+int currentServoAngle = 0;       // Current angle position
+int servoDirection = 1;           // 1 = increasing, -1 = decreasing
+const int SERVO_MIN = 0;          // Minimum servo angle
+const int SERVO_MAX = 180;        // Maximum servo angle
+const int SERVO_STEP = 5;         // Step size per movement (ditingkatkan)
+unsigned long lastServoMove = 0;  // Last movement time
+const unsigned long SERVO_INTERVAL = 10; // Movement interval (ms) (dikurangi)
 
 enum SensorStatus { SENSOR_READY, SENSOR_ERROR };
 
@@ -145,12 +155,12 @@ void callback(char* topic, byte* payload, unsigned int length) {
     if (message == "ON") {
       MANUAL_LAMP_CONTROL = true;
       LAMP_STATE = true;
-      digitalWrite(LAMP_PIN, LOW);  // Nyala (active-low)
+      digitalWrite(LAMP_PIN, HIGH);  // Nyala (active-low)
       Serial.println("Lampu manual NYALA");
     } else if (message == "OFF") {
       MANUAL_LAMP_CONTROL = true;
       LAMP_STATE = false;
-      digitalWrite(LAMP_PIN, HIGH); // Mati
+      digitalWrite(LAMP_PIN, LOW); // Mati
       Serial.println("Lampu manual MATI");
     } else if (message == "AUTO") {
       MANUAL_LAMP_CONTROL = false;
@@ -244,7 +254,7 @@ void setup() {
   pinMode(LAMP_PIN, OUTPUT);
   pinMode(FAN_PIN, OUTPUT);
   digitalWrite(FAN_PIN, LOW);
-  digitalWrite(LAMP_PIN, HIGH);
+  digitalWrite(LAMP_PIN, LOW);
   pinMode(LED_WIFI, OUTPUT);
   pinMode(LED_MQTT, OUTPUT);
   digitalWrite(LED_WIFI, LOW);
@@ -288,35 +298,80 @@ void loop() {
 
   client.loop();
 
+  // ======== Servo Sweep Mechanism ========
+  unsigned long currentMillis = millis();
+  if (currentMillis - lastServoMove >= SERVO_INTERVAL) {
+    lastServoMove = currentMillis;
+    
+    // Update angle position
+    currentServoAngle += servoDirection * SERVO_STEP;
+    
+    // Reverse direction at limits
+    if (currentServoAngle >= SERVO_MAX) {
+      servoDirection = -1;
+      currentServoAngle = SERVO_MAX; // Pastikan tidak melebihi batas
+    } else if (currentServoAngle <= SERVO_MIN) {
+      servoDirection = 1;
+      currentServoAngle = SERVO_MIN; // Pastikan tidak melebihi batas
+    }
+    
+    servoController.update(currentServoAngle);
+  }
+
   dhtSensor.update();
 
   if (dhtSensor.getStatus() == SENSOR_READY) {
     float temperature = dhtSensor.getTemperature();
     float humidity = dhtSensor.getHumidity();
-    int angle = map(temperature, 0, 40, 0, 180);
-    servoController.update(angle);
 
-    // Kontrol otomatis hanya jika tidak dalam mode manual
+    // Kontrol lampu dengan hysteresis untuk mencegah kedipan
     if (!MANUAL_LAMP_CONTROL) {
-      bool lampStatus = temperature < TEMP_THRESHOLD;
-      digitalWrite(LAMP_PIN, lampStatus ? LOW : HIGH);
-      LAMP_STATE = lampStatus;
+      static bool lastLampState = LAMP_STATE;
+      
+      if (lastLampState) {
+        // Jika lampu sedang nyala, matikan hanya jika suhu >= threshold
+        if (temperature >= TEMP_THRESHOLD) {
+          LAMP_STATE = false;
+          lastLampState = false;
+        }
+      } else {
+        // Jika lampu sedang mati, nyalakan hanya jika suhu < threshold - hysteresis
+        if (temperature < TEMP_THRESHOLD - HYSTERESIS) {
+          LAMP_STATE = true;
+          lastLampState = true;
+        }
+      }
+      digitalWrite(LAMP_PIN, LAMP_STATE ? HIGH : LOW);
     }
 
+    // Kontrol kipas dengan hysteresis
     if (!MANUAL_FAN_CONTROL) {
-      bool fanStatus = temperature >= TEMP_THRESHOLD;
-      digitalWrite(FAN_PIN, fanStatus ? HIGH : LOW);
-      FAN_STATE = fanStatus;
+      static bool lastFanState = FAN_STATE;
+      
+      if (lastFanState) {
+        // Jika kipas sedang nyala, matikan hanya jika suhu < threshold
+        if (temperature < TEMP_THRESHOLD) {
+          FAN_STATE = false;
+          lastFanState = false;
+        }
+      } else {
+        // Jika kipas sedang mati, nyalakan hanya jika suhu >= threshold + hysteresis
+        if (temperature >= TEMP_THRESHOLD + HYSTERESIS) {
+          FAN_STATE = true;
+          lastFanState = true;
+        }
+      }
+      digitalWrite(FAN_PIN, FAN_STATE ? HIGH : LOW);
     }
 
     // Membuat JSON
     StaticJsonDocument<200> doc;
-    doc["SuhuLampu"] = temperature;
+    doc["Suhu"] = temperature;
     doc["Kelembapan"] = humidity;
     doc["StatusLampu"] = LAMP_STATE;
     doc["StatusKipas"] = FAN_STATE;
     doc["Threshold"] = TEMP_THRESHOLD;
-    doc["ServoAngle"] = angle;
+    doc["ServoAngle"] = currentServoAngle; // Gunakan sudut sweep
     doc["ManualModeLamp"] = MANUAL_LAMP_CONTROL;
     doc["ManualModeFan"] = MANUAL_FAN_CONTROL;
 
@@ -326,16 +381,17 @@ void loop() {
     // Mengirim data JSON melalui MQTT
     client.publish(mqtt_topic_status, jsonBuffer);
 
-    Serial.printf("Suhu: %.2f °C | Humidity: %.2f %% | Threshold: %.2f | Lamp: %s | Fan: %s | ManualLamp: %s | ManualFan: %s\n", 
+    Serial.printf("Suhu: %.2f °C | Humidity: %.2f %% | Threshold: %.2f | Lamp: %s | Fan: %s | ManualLamp: %s | ManualFan: %s | Servo: %d°\n", 
                   temperature, humidity, TEMP_THRESHOLD, 
                   LAMP_STATE ? "Nyala" : "Mati", 
                   FAN_STATE ? "Nyala" : "Mati",
                   MANUAL_LAMP_CONTROL ? "ON" : "AUTO",
-                  MANUAL_FAN_CONTROL ? "ON" : "AUTO");
+                  MANUAL_FAN_CONTROL ? "ON" : "AUTO",
+                  currentServoAngle);
   
   } else {
     Serial.println("Gagal membaca sensor DHT!");
   }
 
-  delay(1000);
+  delay(10); // Small delay for stability
 }
